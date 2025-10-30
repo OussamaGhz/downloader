@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15
+    container_name: telegram_scraper_db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: app
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    ports:
+      - "5432:5432"
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Prefect Orion Server
+  orion:
+    image: prefecthq/prefect:2-python3.11
+    container_name: prefect_orion
+    command: prefect server start --host 0.0.0.0
+    environment:
+      PREFECT_API_URL: http://orion:4200/api
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://user:password@db:5432/prefect
+    ports:
+      - "4200:4200"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram_scraper_backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/app
+      ENCRYPTION_KEY: y96xWk_9frl_m_SEgGUI-t6GIshtduSDXdiQoThVzok=
+      PREFECT_API_URL: http://orion:4200/api
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      orion:
+        condition: service_healthy
+    networks:
+      - app_network
+    volumes:
+      - ./app:/app/app
+      - ./sessions:/app/sessions
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Prefect Agent (for executing flows)
+  agent:
+    image: prefecthq/prefect:2-python3.11
+    container_name: prefect_agent
+    command: sh -c "sleep 10 && pip install -q -r /app/requirements.txt && prefect agent start -q default"
+    environment:
+      PREFECT_API_URL: http://orion:4200/api
+      DATABASE_URL: postgresql://user:password@db:5432/app
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      PYTHONPATH: /app
+    depends_on:
+      orion:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    networks:
+      - app_network
+    volumes:
+      - ./app:/app/app
+      - ./requirements.txt:/app/requirements.txt
+      - ./sessions:/app/sessions
+      - ./.env:/app/.env
+    working_dir: /app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  app_network:
+    driver: bridge

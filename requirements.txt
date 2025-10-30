@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+asyncpg
+prefect
+python-dotenv
+cryptography
+alembic
+requests
+telethon
+pydantic
+python-multipart
