@@ -6,7 +6,7 @@ from sqlalchemy import Column, String, DateTime, Integer
 from sqlalchemy.sql import func
 from app.core.database import Base
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 class TempSession(Base):
@@ -29,4 +29,4 @@ class TempSession(Base):
     @property
     def is_expired(self):
         """Check if temporary session has expired"""
-        return datetime.utcnow() > self.expires_at
+        return datetime.now(timezone.utc) > self.expires_at

@@ -5,7 +5,7 @@ API Routes for Telegram Session Management with Interactive OTP Flow
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 
 from app.core.database import get_db
@@ -69,7 +69,7 @@ async def send_otp(request: OTPSendRequest, db: Session = Depends(get_db)):
             api_hash=encrypt_data(request.api_hash),
             session_string=encrypt_data(session_string),
             phone_code_hash=encrypt_data(phone_code_hash),
-            expires_at=datetime.utcnow() + timedelta(minutes=10),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         )
 
         db.add(temp_session)
@@ -211,7 +211,7 @@ async def upload_session_file(
             api_hash=encrypt_data(api_hash),
             session_string=encrypt_data(session_string),
             phone_code_hash=encrypt_data("FILE_UPLOAD"),  # Marker for file uploads
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
 
         db.add(temp_session)

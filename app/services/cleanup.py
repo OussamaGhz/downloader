@@ -3,7 +3,7 @@ Background cleanup service for expired temporary sessions
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -22,7 +22,7 @@ async def cleanup_expired_temp_sessions():
             # Delete expired temporary sessions
             deleted_count = (
                 db.query(TempSession)
-                .filter(TempSession.expires_at < datetime.utcnow())
+                .filter(TempSession.expires_at < datetime.now(timezone.utc))
                 .delete()
             )
 
