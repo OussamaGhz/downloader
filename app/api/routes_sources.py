@@ -56,7 +56,7 @@ def create_private_source(source: SourceCreatePrivate, db: Session = Depends(get
         access_level=AccessLevelEnum.PRIVATE,
         identifier=str(source.channel_id),
         channel_title=source.channel_title,
-        session_id=source.session_id,
+        session_ref=source.session_id, 
         file_types=source.file_types,
         target=source.target,
         target_path=source.target_path,
@@ -69,15 +69,15 @@ def create_private_source(source: SourceCreatePrivate, db: Session = Depends(get
     db.refresh(new_source)
 
     # Create Prefect deployment
-    if source.schedule:
-        try:
-            prefect_client.create_deployment(
-                source_id=str(new_source.id),
-                source_name=new_source.name,
-                cron_schedule=source.schedule,
-            )
-        except Exception as e:
-            print(f"Warning: Failed to create Prefect deployment: {e}")
+   
+    try:
+        prefect_client.create_deployment(
+            source_id=str(new_source.id),
+            source_name=new_source.name,
+            cron_schedule="* * * * *",
+        )
+    except Exception as e:
+        print(f"Warning: Failed to create Prefect deployment: {e}")
 
     return new_source
 
@@ -110,15 +110,16 @@ def create_public_source(source: SourceCreatePublic, db: Session = Depends(get_d
     db.refresh(new_source)
 
     # Create Prefect deployment
-    if source.schedule:
-        try:
-            prefect_client.create_deployment(
-                source_id=str(new_source.id),
-                source_name=new_source.name,
-                cron_schedule=source.schedule,
-            )
-        except Exception as e:
-            print(f"Warning: Failed to create Prefect deployment: {e}")
+    print("hereerere")
+    
+    try:
+        prefect_client.create_deployment(
+            source_id=str(new_source.id),
+            source_name=new_source.name,
+            cron_schedule="* * * * *"
+        )
+    except Exception as e:
+        print(f"Warning: Failed to create Prefect deployment: {e}")
 
     return new_source
 

@@ -42,7 +42,7 @@ class Source(Base):
     channel_title = Column(String)  # Display name of the channel
 
     # Session reference (for private channels)
-    session_id = Column(String, ForeignKey("telegram_sessions.id"), nullable=True)
+    session_ref = Column(String, ForeignKey("telegram_sessions.id"), nullable=True)
     session = relationship("TelegramSession", backref="sources")
 
     # Bot token (optional - for public channels)

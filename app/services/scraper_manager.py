@@ -5,7 +5,7 @@ from typing import List
 class ScraperManager:
     """
     Manages different types of scrapers based on source configuration.
-    Handles public channels, private joinable channels, and private restricted channels.
+    Handles public channels and private channels (with or without session).
     """
 
     @staticmethod
@@ -14,15 +14,12 @@ class ScraperManager:
         Returns the appropriate scraper based on the source's access level.
 
         - Public: Uses bot token for public channel access
-        - Private Joinable: Uses user session to join and scrape
-        - Private Restricted: Uses existing session file from authorized member
+        - Private: Uses user session to access private channel
         """
         if config.access_level == AccessLevelEnum.PUBLIC:
             return PublicChannelScraper(config)
-        elif config.access_level == AccessLevelEnum.PRIVATE_JOINABLE:
-            return PrivateJoinableScraper(config)
-        elif config.access_level == AccessLevelEnum.PRIVATE_RESTRICTED:
-            return PrivateRestrictedScraper(config)
+        elif config.access_level == AccessLevelEnum.PRIVATE:
+            return PrivateChannelScraper(config)
         else:
             raise ValueError(f"Unknown access level: {config.access_level}")
 
@@ -51,45 +48,31 @@ class PublicChannelScraper:
         print(f"Uploading files to {self.config.target}")
 
 
-class PrivateJoinableScraper:
-    """Scraper for private channels that can be joined with invite link."""
+class PrivateChannelScraper:
+    """
+    Scraper for private Telegram channels using user session.
+    Handles both joinable channels (with invite link) and restricted channels (existing session).
+    """
 
     def __init__(self, config: Source):
         self.config = config
 
     def fetch_messages(self) -> List[dict]:
-        """Fetch messages from private joinable channel using user session."""
-        # TODO: Implement using Telethon/Pyrogram with api_id, api_hash
-        # Join channel using invite link if not already a member
-        print(
-            f"Fetching messages from private joinable channel: {self.config.identifier}"
-        )
-        return []
+        """
+        Fetch messages from private channel using user session.
 
-    def download_files(self, messages: List[dict]) -> List[str]:
-        """Download files from messages."""
-        print(f"Downloading files for: {self.config.name}")
-        return []
+        - If session_ref exists: Use stored session file from authorized member
+        - If no session_ref: Attempt to join using invite link (if available)
+        """
+        if self.config.session_ref:
+            print(f"Fetching messages from private channel: {self.config.identifier}")
+            print(f"Using session: {self.config.session_ref}")
+        else:
+            print(f"Fetching messages from private channel: {self.config.identifier}")
+            print("No session file provided - attempting to join with invite link")
 
-    def upload_files(self, files: List[str]):
-        """Upload files to target storage."""
-        print(f"Uploading files to {self.config.target}")
-
-
-class PrivateRestrictedScraper:
-    """Scraper for private restricted channels using existing authorized session."""
-
-    def __init__(self, config: Source):
-        self.config = config
-
-    def fetch_messages(self) -> List[dict]:
-        """Fetch messages using stored session file from authorized member."""
-        # TODO: Load session file from self.config.session_ref
-        # Use Telethon/Pyrogram with the existing session
-        print(
-            f"Fetching messages from private restricted channel: {self.config.identifier}"
-        )
-        print(f"Using session: {self.config.session_ref}")
+        # TODO: Load session file from self.config.session_ref if available
+        # TODO: Use Telethon/Pyrogram with the existing session or join with invite
         return []
 
     def download_files(self, messages: List[dict]) -> List[str]:

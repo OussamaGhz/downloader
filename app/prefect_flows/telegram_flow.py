@@ -1,6 +1,9 @@
 from prefect import flow, task
 from app.core.database import SessionLocal
 from app.models.source import Source
+from app.models.session import (
+    TelegramSession,
+)  # Import to resolve SQLAlchemy relationship
 from app.services.scraper_manager import ScraperManager
 from app.services.encryption import decrypt_data
 
