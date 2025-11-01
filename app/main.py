@@ -11,6 +11,7 @@ from .core.database import engine, Base
 from .models.session import TelegramSession
 from .models.temp_session import TempSession
 from .models.source import Source
+from .models.scrape import ScrapeRun, ScrapedFile, ScrapeLog
 from .services.cleanup import cleanup_expired_temp_sessions
 
 

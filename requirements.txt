@@ -11,3 +11,5 @@ requests
 telethon
 pydantic
 python-multipart
+boto3
+rarfile

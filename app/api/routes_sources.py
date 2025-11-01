@@ -74,7 +74,7 @@ def create_private_source(source: SourceCreatePrivate, db: Session = Depends(get
         prefect_client.create_deployment(
             source_id=str(new_source.id),
             source_name=new_source.name,
-            cron_schedule="* * * * *",
+            cron_schedule="*/30 * * * *",
         )
     except Exception as e:
         print(f"Warning: Failed to create Prefect deployment: {e}")
@@ -116,7 +116,7 @@ def create_public_source(source: SourceCreatePublic, db: Session = Depends(get_d
         prefect_client.create_deployment(
             source_id=str(new_source.id),
             source_name=new_source.name,
-            cron_schedule="* * * * *"
+            cron_schedule="*/30 * * * *"
         )
     except Exception as e:
         print(f"Warning: Failed to create Prefect deployment: {e}")

@@ -44,6 +44,12 @@ class Source(Base):
     # Session reference (for private channels)
     session_ref = Column(String, ForeignKey("telegram_sessions.id"), nullable=True)
     session = relationship("TelegramSession", backref="sources")
+    runs = relationship(
+        "ScrapeRun", back_populates="source", cascade="all, delete-orphan"
+    )
+    files = relationship(
+        "ScrapedFile", back_populates="source", cascade="all, delete-orphan"
+    )
 
     # Bot token (optional - for public channels)
     bot_token = Column(String, nullable=True)  # Encrypted
