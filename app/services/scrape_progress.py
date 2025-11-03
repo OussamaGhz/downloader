@@ -4,8 +4,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, Iterable, Optional, Set, Tuple
 from uuid import UUID as UUIDType
+import logging
 
-from sqlalchemy.exc import IntegrityError
+# Note: avoid importing sqlalchemy.exc directly to prevent linter/import issues
 
 from app.core.database import SessionLocal
 from app.models.scrape import (
@@ -81,10 +82,25 @@ def log_event(
     message: str,
     level: LogLevel = LogLevel.INFO,
     details: Optional[Dict] = None,
-) -> ScrapeLog:
+) -> Optional[ScrapeLog]:
+    logger = logging.getLogger(__name__)
     with get_db_session() as db:
+        # Ensure the referenced run exists before inserting a log entry.
+        run_uuid = _to_uuid(run_id)
+        run = db.query(ScrapeRun).filter(ScrapeRun.id == run_uuid).first()
+        if not run:
+            # Defensive behavior: do not write log entries referencing a
+            # non-existent run. Log locally and return None; the caller
+            # should create the run before attempting to persist logs.
+            logger.warning(
+                "log_event: attempt to write log for missing run %s - message=%s",
+                run_id,
+                message,
+            )
+            return None
+
         log_entry = ScrapeLog(
-            run_id=_to_uuid(run_id),
+            run_id=run_uuid,
             level=level,
             message=message,
             details=details,
@@ -126,7 +142,15 @@ def record_scraped_file(
         db.add(file_entry)
         try:
             db.commit()
-        except IntegrityError:
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.exception(
+                "record_scraped_file: failed to commit scraped file (run=%s, message=%s, file_id=%s): %s",
+                run_id,
+                message_id,
+                file_id,
+                e,
+            )
             db.rollback()
             return None
         db.refresh(file_entry)

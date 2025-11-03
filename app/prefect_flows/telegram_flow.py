@@ -138,11 +138,6 @@ def _normalized_processed_keys(keys: Sequence[Sequence[Any]]) -> Set[Tuple[int, 
 
 
 def _safe_file_identifier(message: Any) -> Tuple[str, Optional[str]]:
-    """Return a stable identifier for a Telegram message attachment.
-
-    Telethon's ``message.file.id`` can raise for photos lacking location data.
-    This helper provides fallbacks to other stable identifiers.
-    """
 
     try:
         identifier = getattr(message.file, "id", None)
@@ -226,13 +221,10 @@ def initialize_run(source_id: str) -> Dict[str, Any]:
             raise RuntimeError("Source is missing Telegram API credentials")
 
         file_types = source.file_types or []
-        # log files types 
-        _log_and_record(
-            run_id=str(source.id),
-            message=f"Source file types: {file_types}",
-            level=LogLevel.DEBUG,
-        )
         
+        logger = get_run_logger()
+        logger.debug(f"Source file types: {file_types}")
+
         config = SourceConfig(
             id=str(source.id),
             name=source.name,
