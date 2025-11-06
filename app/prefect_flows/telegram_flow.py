@@ -333,10 +333,261 @@ def collect_new_files(initial_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [asdict(file) for file in pending_files]
 
 
-@task
+@task(
+    retries=2,
+    retry_delay_seconds=60,
+    timeout_seconds=1800,
+    name="process_single_file",
+)
+async def process_single_file(
+    config_dict: Dict[str, Any],
+    run_id: str,
+    file_item: Dict[str, Any],
+    temp_dir_path: str,
+    file_index: int,
+    total_files: int,
+) -> Dict[str, Any]:
+    """
+    Process a single file: download, extract, store, and record.
+    This task provides granular visibility and automatic retries per file.
+    """
+    config = SourceConfig(**config_dict)
+    logger = get_run_logger()
+    
+    message_id = file_item["message_id"]
+    file_id = file_item["file_id"]
+    file_name = file_item["file_name"]
+    
+    _log_and_record(
+        run_id,
+        f"[{file_index}/{total_files}] Starting: message {message_id} - {file_name}",
+        LogLevel.INFO,
+    )
+    
+    # Build fresh Telethon client for this file
+    client = _build_client(config)
+    
+    try:
+        await _ensure_client_ready(client, config)
+        entity = await _resolve_entity(client, config.identifier)
+        
+        # Download with retries
+        attempt = 0
+        delay = DOWNLOAD_RETRY_BASE_DELAY
+        local_path = None
+        
+        while attempt < DOWNLOAD_RETRY_ATTEMPTS:
+            try:
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] Downloading message {message_id}...",
+                )
+                
+                message = await client.get_messages(entity, ids=message_id)
+                if not message or not message.file:
+                    _log_and_record(
+                        run_id,
+                        f"[{file_index}/{total_files}] Skipping: no file attachment",
+                        LogLevel.WARNING,
+                    )
+                    return {"success": False, "reason": "no_file", "message_id": message_id}
+                
+                destination = Path(temp_dir_path) / f"{message_id}_{file_id}"
+                download_path = await client.download_media(message, file=str(destination))
+                local_path = Path(download_path)
+                
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] Downloaded: {local_path.name} ({local_path.stat().st_size / 1024 / 1024:.1f} MB)",
+                )
+                break
+                
+            except (TelethonTimeoutError, asyncio.TimeoutError) as exc:
+                attempt += 1
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] Timeout (attempt {attempt}/{DOWNLOAD_RETRY_ATTEMPTS}): {exc}",
+                    LogLevel.WARNING,
+                )
+                if attempt < DOWNLOAD_RETRY_ATTEMPTS:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    raise
+        
+        if not local_path:
+            return {"success": False, "reason": "download_failed", "message_id": message_id}
+        
+        # Get storage handler
+        storage = get_storage_handler(
+            target=TargetEnum(config.target),
+            source_id=config.id,
+            source_name=config.name,
+            run_id=run_id,
+            target_path=config.target_path,
+        )
+        
+        stored_count = 0
+        extension = local_path.suffix.lower()
+        
+        # Process based on file type
+        if is_archive(local_path.name):
+            _log_and_record(
+                run_id,
+                f"[{file_index}/{total_files}] Extracting archive: {local_path.name}",
+            )
+            
+            extract_dir = Path(temp_dir_path) / f"extracted_{message_id}_{file_id}"
+            
+            try:
+                extracted_paths = await asyncio.to_thread(
+                    extract_archive, local_path, extract_dir
+                )
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] Extracted {len(extracted_paths)} file(s)",
+                )
+            except Exception as exc:
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] Extraction failed: {exc}",
+                    LogLevel.ERROR,
+                )
+                return {
+                    "success": False,
+                    "reason": "extraction_failed",
+                    "message_id": message_id,
+                }
+            
+            allowed = filter_allowed_files(extracted_paths, config.file_types or ["txt"])
+            
+            if not allowed:
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] No allowed files in archive",
+                    LogLevel.INFO,
+                )
+                return {
+                    "success": True,
+                    "stored": 0,
+                    "message_id": message_id,
+                    "reason": "no_allowed_files",
+                }
+            
+            _log_and_record(
+                run_id,
+                f"[{file_index}/{total_files}] Storing {len(allowed)} extracted file(s)...",
+            )
+            
+            for extracted_file in allowed:
+                flat_name = f"{config.name}_{extracted_file.name}"
+                
+                storage_path = await asyncio.to_thread(
+                    storage.store_file, str(extracted_file), flat_name
+                )
+                checksum = await asyncio.to_thread(sha256_checksum, extracted_file)
+                
+                file_record = await asyncio.to_thread(
+                    record_scraped_file,
+                    run_id=run_id,
+                    source_id=config.id,
+                    message_id=message_id,
+                    file_id=file_id,
+                    file_name=extracted_file.name,
+                    storage_path=storage_path,
+                    file_extension=extracted_file.suffix.lower(),
+                    size_bytes=extracted_file.stat().st_size,
+                    checksum=checksum,
+                    extracted_from=local_path.name,
+                    extra_metadata={"archived": True},
+                )
+                
+                if file_record:
+                    stored_count += 1
+                    _log_and_record(
+                        run_id,
+                        f"[{file_index}/{total_files}] Stored extracted: {extracted_file.name}",
+                        LogLevel.DEBUG,
+                    )
+        
+        else:
+            # Regular file processing
+            normalized_ext = extension.lstrip(".")
+            if config.allowed_extensions and normalized_ext not in config.allowed_extensions:
+                _log_and_record(
+                    run_id,
+                    f"[{file_index}/{total_files}] Skipping: extension {extension} not allowed",
+                    LogLevel.INFO,
+                )
+                return {
+                    "success": True,
+                    "stored": 0,
+                    "message_id": message_id,
+                    "reason": "extension_not_allowed",
+                }
+            
+            _log_and_record(
+                run_id,
+                f"[{file_index}/{total_files}] Storing file: {local_path.name}",
+            )
+            
+            flat_name = f"{config.name}_{local_path.name}"
+            
+            storage_path = await asyncio.to_thread(
+                storage.store_file, str(local_path), flat_name
+            )
+            checksum = await asyncio.to_thread(sha256_checksum, local_path)
+            
+            file_record = await asyncio.to_thread(
+                record_scraped_file,
+                run_id=run_id,
+                source_id=config.id,
+                message_id=message_id,
+                file_id=file_id,
+                file_name=local_path.name,
+                storage_path=storage_path,
+                file_extension=extension,
+                size_bytes=local_path.stat().st_size,
+                checksum=checksum,
+            )
+            
+            if file_record:
+                stored_count = 1
+        
+        _log_and_record(
+            run_id,
+            f"[{file_index}/{total_files}] Completed: stored {stored_count} file(s)",
+            LogLevel.INFO,
+        )
+        
+        return {
+            "success": True,
+            "message_id": message_id,
+            "stored": stored_count,
+            "processed": 1,
+        }
+    
+    except Exception as exc:
+        _log_and_record(
+            run_id,
+            f"[{file_index}/{total_files}] Failed: {exc}",
+            LogLevel.ERROR,
+            details={"error": str(exc), "file": file_name},
+        )
+        raise
+    
+    finally:
+        await client.disconnect()
+
+
+@task(name="process_files_orchestrator")
 async def process_files(
     initial_data: Dict[str, Any], pending_files: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
+    """
+    Orchestrate parallel processing of files using task-per-file approach.
+    Each file gets its own Prefect task for better visibility and retry control.
+    """
     if not pending_files:
         return {"processed": 0, "stored": 0, "messages": 0}
 
@@ -357,281 +608,89 @@ async def process_files(
     total_planned = len(selected_files)
     _log_and_record(
         run_id,
-        (
-            f"Processing {total_planned} pending attachment(s) "
-            f"with concurrency={DOWNLOAD_CONCURRENCY}"
-        ),
+        f"Spawning {total_planned} parallel file processing tasks (concurrency={DOWNLOAD_CONCURRENCY})",
     )
 
+    # Create shared temp directory
     temp_dir = tempfile.TemporaryDirectory()
-    storage = get_storage_handler(
-        target=TargetEnum(config.target),
-        source_id=config.id,
-        source_name=config.name,
-        run_id=run_id,
-        target_path=config.target_path,
-    )
-
-    processed_files = 0
-    stored_files = 0
-    message_ids_seen: Set[int] = set()
-
-    client = _build_client(config)
-    await _ensure_client_ready(client, config)
-    entity = await _resolve_entity(client, config.identifier)
-
-    async def download_item(
-        item: Dict[str, Any],
-    ) -> Optional[Tuple[Dict[str, Any], Path]]:
-        attempt = 0
-        delay = DOWNLOAD_RETRY_BASE_DELAY
-
-        while attempt < DOWNLOAD_RETRY_ATTEMPTS:
-            try:
-                message = await client.get_messages(entity, ids=item["message_id"])
-            except (TelethonTimeoutError, asyncio.TimeoutError) as exc:
-                attempt += 1
-                _log_and_record(
-                    run_id,
-                    (
-                        f"Timeout fetching message {item['message_id']} (attempt {attempt}/"
-                        f"{DOWNLOAD_RETRY_ATTEMPTS}): {exc}"
-                    ),
-                    LogLevel.WARNING,
-                )
-                await asyncio.sleep(delay)
-                delay *= 2
-                continue
-            except Exception as exc:
-                _log_and_record(
-                    run_id,
-                    f"Failed to fetch message {item['message_id']}: {exc}",
-                    LogLevel.ERROR,
-                )
-                return None
-
-            if not message or not message.file:
-                _log_and_record(
-                    run_id,
-                    f"Skipping message {item['message_id']} with no file",
-                    LogLevel.WARNING,
-                )
-                return None
-
-            destination = (
-                Path(temp_dir.name) / f"{item['message_id']}_{item['file_id']}"
+    
+    try:
+        # Submit all files as separate Prefect tasks
+        _log_and_record(
+            run_id,
+            f"Submitting {total_planned} file tasks for parallel execution...",
+        )
+        
+        futures = []
+        for idx, file_item in enumerate(selected_files, 1):
+            future = process_single_file.submit(
+                config_dict=initial_data["config"],
+                run_id=run_id,
+                file_item=file_item,
+                temp_dir_path=temp_dir.name,
+                file_index=idx,
+                total_files=total_planned,
             )
+            futures.append((idx, file_item, future))
+        
+        _log_and_record(
+            run_id,
+            f"Waiting for {len(futures)} file tasks to complete...",
+        )
+        
+        # Wait for all tasks and collect results
+        results = []
+        for idx, file_item, future in futures:
             try:
-                download_path = await client.download_media(
-                    message, file=str(destination)
-                )
-                return item, Path(download_path)
-            except (TelethonTimeoutError, asyncio.TimeoutError) as exc:
-                attempt += 1
-                _log_and_record(
-                    run_id,
-                    (
-                        f"Timeout downloading message {item['message_id']} (attempt {attempt}/"
-                        f"{DOWNLOAD_RETRY_ATTEMPTS}): {exc}"
-                    ),
-                    LogLevel.WARNING,
-                )
-                await asyncio.sleep(delay)
-                delay *= 2
-                continue
+                result = await future.result()
+                results.append(result)
+                
+                if result.get("success"):
+                    stored = result.get("stored", 0)
+                    if stored > 0:
+                        update_run_counts(run_id, files_processed=idx)
             except Exception as exc:
+                # Task failed after all retries
                 _log_and_record(
                     run_id,
-                    f"Failed to download message {item['message_id']} attachment: {exc}",
+                    f"File task [{idx}/{total_planned}] failed permanently: {exc}",
                     LogLevel.ERROR,
+                    details={
+                        "message_id": file_item["message_id"],
+                        "file_name": file_item["file_name"],
+                        "error": str(exc),
+                    },
                 )
-                return None
-
+                results.append({
+                    "success": False,
+                    "reason": "task_failed",
+                    "message_id": file_item["message_id"],
+                })
+        
+        # Aggregate results
+        successful = [r for r in results if r.get("success")]
+        stored_files = sum(r.get("stored", 0) for r in successful)
+        message_ids = set(r.get("message_id") for r in successful if r.get("message_id"))
+        
+        failed_count = len(results) - len(successful)
+        
         _log_and_record(
             run_id,
             (
-                f"Giving up on message {item['message_id']} after "
-                f"{DOWNLOAD_RETRY_ATTEMPTS} timeout attempts"
+                f"All file tasks completed: {len(successful)} successful, "
+                f"{failed_count} failed, {stored_files} files stored"
             ),
-            LogLevel.ERROR,
+            LogLevel.INFO if failed_count == 0 else LogLevel.WARNING,
         )
-        return None
-
-    try:
-        current_index = 0
-        for batch in _chunked(selected_files, max(1, DOWNLOAD_CONCURRENCY)):
-            batch_results = await asyncio.gather(
-                *(download_item(item) for item in batch),
-                return_exceptions=True,
-            )
-
-            for result in batch_results:
-                if isinstance(result, Exception):
-                    _log_and_record(
-                        run_id,
-                        f"Unexpected exception during download: {result}",
-                        LogLevel.ERROR,
-                    )
-                    continue
-                if result is None:
-                    continue
-
-                item, local_path = result
-                current_index += 1
-                processed_files += 1
-                message_ids_seen.add(item["message_id"])
-                _log_and_record(
-                    run_id,
-                    (
-                        f"Processing file {current_index}/{total_planned} "
-                        f"from message {item['message_id']}: {local_path.name}"
-                    ),
-                )
-
-                extension = local_path.suffix.lower()
-
-                if is_archive(local_path.name):
-                    extract_dir = (
-                        Path(temp_dir.name)
-                        / f"extracted_{item['message_id']}_{item['file_id']}"
-                    )
-                    try:
-                        extracted_paths = extract_archive(local_path, extract_dir)
-                    except Exception as exc:  # pragma: no cover - extraction errors
-                        _log_and_record(
-                            run_id,
-                            f"Failed to extract {local_path.name}: {exc}",
-                            LogLevel.ERROR,
-                        )
-                        continue
-
-                    allowed = filter_allowed_files(
-                        extracted_paths, config.file_types or ["txt"]
-                    )
-                    if not allowed:
-                        _log_and_record(
-                            run_id,
-                            f"Archive {local_path.name} did not contain allowed files",
-                            LogLevel.INFO,
-                        )
-                        continue
-
-                    for extracted_file in allowed:
-                        # Flat naming: source_name_original_filename
-                        flat_name = f"{config.name}_{extracted_file.name}"
-                        storage_path = storage.store_file(
-                            str(extracted_file),
-                            flat_name,
-                        )
-                        checksum = sha256_checksum(extracted_file)
-                        file_record = record_scraped_file(
-                            run_id=run_id,
-                            source_id=config.id,
-                            message_id=item["message_id"],
-                            file_id=item["file_id"],
-                            file_name=extracted_file.name,
-                            storage_path=storage_path,
-                            file_extension=extracted_file.suffix.lower(),
-                            size_bytes=extracted_file.stat().st_size,
-                            checksum=checksum,
-                            extracted_from=local_path.name,
-                            extra_metadata={"archived": True},
-                        )
-                        if file_record:
-                            stored_files += 1
-                            update_run_counts(run_id, files_processed=stored_files)
-                            _log_and_record(
-                                run_id,
-                                (
-                                    "Stored extracted file "
-                                    f"{extracted_file.name} ({stored_files}/{total_planned} stored)"
-                                ),
-                                LogLevel.INFO,
-                            )
-                            _log_and_record(
-                                run_id,
-                                "DB record created",
-                                LogLevel.DEBUG,
-                                details={
-                                    "id": str(file_record.id),
-                                    "run_id": str(file_record.run_id),
-                                    "source_id": str(file_record.source_id),
-                                    "message_id": file_record.message_id,
-                                    "file_id": file_record.file_id,
-                                    "file_name": file_record.file_name,
-                                    "storage_path": file_record.storage_path,
-                                    "file_extension": file_record.file_extension,
-                                    "size_bytes": file_record.size_bytes,
-                                    "checksum": file_record.checksum,
-                                    "extracted_from": file_record.extracted_from,
-                                },
-                            )
-                    continue
-
-                normalized_ext = extension.lstrip(".")
-                if (
-                    config.allowed_extensions
-                    and normalized_ext not in config.allowed_extensions
-                ):
-                    _log_and_record(
-                        run_id,
-                        f"Skipping file {local_path.name} (extension not allowed)",
-                        LogLevel.INFO,
-                    )
-                    continue
-
-                # Flat naming: source_name_original_filename
-                flat_name = f"{config.name}_{local_path.name}"
-                storage_path = storage.store_file(str(local_path), flat_name)
-                checksum = sha256_checksum(local_path)
-                file_record = record_scraped_file(
-                    run_id=run_id,
-                    source_id=config.id,
-                    message_id=item["message_id"],
-                    file_id=item["file_id"],
-                    file_name=local_path.name,
-                    storage_path=storage_path,
-                    file_extension=extension,
-                    size_bytes=local_path.stat().st_size,
-                    checksum=checksum,
-                )
-                if file_record:
-                    stored_files += 1
-                    update_run_counts(run_id, files_processed=stored_files)
-                    _log_and_record(
-                        run_id,
-                        (
-                            f"Stored file {local_path.name} "
-                            f"({stored_files}/{total_planned} stored)"
-                        ),
-                    )
-                    _log_and_record(
-                        run_id,
-                        "DB record created",
-                        LogLevel.DEBUG,
-                        details={
-                            "id": str(file_record.id),
-                            "run_id": str(file_record.run_id),
-                            "source_id": str(file_record.source_id),
-                            "message_id": file_record.message_id,
-                            "file_id": file_record.file_id,
-                            "file_name": file_record.file_name,
-                            "storage_path": file_record.storage_path,
-                            "file_extension": file_record.file_extension,
-                            "size_bytes": file_record.size_bytes,
-                            "checksum": file_record.checksum,
-                            "extracted_from": file_record.extracted_from,
-                        },
-                    )
+        
+        return {
+            "processed": len(successful),
+            "stored": stored_files,
+            "messages": len(message_ids),
+        }
+    
     finally:
-        await client.disconnect()
         temp_dir.cleanup()
-
-    return {
-        "processed": processed_files,
-        "stored": stored_files,
-        "messages": len(message_ids_seen),
-    }
 
 
 @task
