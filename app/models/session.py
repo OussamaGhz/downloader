@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, LargeBinary, Integer, Text
+from sqlalchemy import Column, String, DateTime, LargeBinary, Integer, Text, Enum
 from sqlalchemy.sql import func
 from app.core.database import Base
 import uuid
@@ -22,6 +22,11 @@ class TelegramSession(Base):
     is_active = Column(String, default="active")  # active, expired, revoked
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    last_checked_at = Column(DateTime(timezone=True), nullable=True)
+    privacy = Column(
+        Enum("PRIVATE", "PUBLIC", name="telegram_session_privacy"),
+        nullable=True,
+    )
 
     def __repr__(self):
         return f"<TelegramSession {self.name} - {self.phone_number}>"

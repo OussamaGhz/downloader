@@ -13,3 +13,4 @@ pydantic
 python-multipart
 boto3
 rarfile
+smbprotocol

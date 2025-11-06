@@ -578,6 +578,7 @@ async def process_files(
                     continue
 
                 relative_name = relative_base / local_path.name
+                
                 storage_path = storage.store_file(
                     str(local_path), str(relative_name).replace(os.sep, "/")
                 )
