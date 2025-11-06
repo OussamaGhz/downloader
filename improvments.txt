@@ -1,0 +1,30 @@
+Instead of removing the limit entirely, set a reasonable batch size:
+
+MAX_FILES_PER_RUN = 100  # Process 100 files per run
+
+batch_size = config.source.batch_size or 100  # Default 100, override via Source settings
+selected_files = pending_files[:batch_size]
+
+
+1. Concurrency Limits (Recommended)
+ Set via Prefect CLI
+ prefect concurrency-limit create telegram-scraper --limit 1
+ # Or via Python API
+ from prefect.client import get_client
+ async with get_client() as client:
+     await client.create_concurrency_limit(
+         tag="telegram-scraper",
+         concurrency_limit=1
+     )
+   
+ @flow(
+     name="telegram-scraper-flow",
+     task_runner=ConcurrentTaskRunner(),
+     tags=["telegram-scraper"]  # <-- Add this
+ )
+ def telegram_scraper_flow(source_id: UUID):
+     # ...
+    
+    
+Behavior: New scheduled runs wait in queue until the previous one completes.
+

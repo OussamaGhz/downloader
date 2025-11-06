@@ -221,7 +221,7 @@ def initialize_run(source_id: str) -> Dict[str, Any]:
             raise RuntimeError("Source is missing Telegram API credentials")
 
         file_types = source.file_types or []
-        
+
         logger = get_run_logger()
         logger.debug(f"Source file types: {file_types}")
 
@@ -279,6 +279,12 @@ def collect_new_files(initial_data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
             key = (message.id, file_id)
             if key in processed_keys:
+                _log_and_record(
+                    run_id,
+                    f"Skipping previously processed file from message {message.id}",
+                    LogLevel.DEBUG,
+                    details={"file_id": file_id},
+                )
                 continue
 
             file_name = message.file.name or f"message_{message.id}"
@@ -361,6 +367,7 @@ async def process_files(
     storage = get_storage_handler(
         target=TargetEnum(config.target),
         source_id=config.id,
+        source_name=config.name,
         run_id=run_id,
         target_path=config.target_path,
     )
@@ -482,7 +489,6 @@ async def process_files(
                 )
 
                 extension = local_path.suffix.lower()
-                relative_base = Path(str(item["message_id"]))
 
                 if is_archive(local_path.name):
                     extract_dir = (
@@ -511,14 +517,11 @@ async def process_files(
                         continue
 
                     for extracted_file in allowed:
-                        relative_name = (
-                            relative_base
-                            / "extracted"
-                            / extracted_file.relative_to(extract_dir)
-                        )
+                        # Flat naming: source_name_original_filename
+                        flat_name = f"{config.name}_{extracted_file.name}"
                         storage_path = storage.store_file(
                             str(extracted_file),
-                            str(relative_name).replace(os.sep, "/"),
+                            flat_name,
                         )
                         checksum = sha256_checksum(extracted_file)
                         file_record = record_scraped_file(
@@ -577,11 +580,9 @@ async def process_files(
                     )
                     continue
 
-                relative_name = relative_base / local_path.name
-                
-                storage_path = storage.store_file(
-                    str(local_path), str(relative_name).replace(os.sep, "/")
-                )
+                # Flat naming: source_name_original_filename
+                flat_name = f"{config.name}_{local_path.name}"
+                storage_path = storage.store_file(str(local_path), flat_name)
                 checksum = sha256_checksum(local_path)
                 file_record = record_scraped_file(
                     run_id=run_id,

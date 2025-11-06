@@ -1,11 +1,36 @@
 import os
 import shutil
 import uuid
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
 
 from app.models.source import TargetEnum
+
+
+def sanitize_name(name: str) -> str:
+    """Sanitize source/file names for filesystem compatibility.
+
+    Removes or replaces characters that are invalid in Windows/SMB paths:
+    - Replaces spaces with underscores
+    - Removes: < > : " / \\ | ? * & # % @ ! $ ^ ( ) [ ] { } ; ' ` ~
+    - Removes control characters
+    - Ensures only alphanumeric, underscore, hyphen, and dot remain
+    """
+    # Replace spaces with underscores
+    name = name.replace(" ", "_")
+    # Remove invalid Windows/SMB filename characters and common problematic chars
+    name = re.sub(r'[<>:"/\\|?*&#%@!$^()\[\]{};\'`~]', "", name)
+    # Only allow alphanumeric, underscore, hyphen, dot, and common safe chars
+    name = re.sub(r"[^\w\-.]", "", name)
+    # Collapse multiple underscores
+    name = re.sub(r"_+", "_", name)
+    # Strip leading/trailing underscores and dots
+    name = name.strip("_.")
+    # Ensure name is not empty
+    return name or "unnamed"
+
 
 try:
     import boto3  # type: ignore
@@ -30,8 +55,15 @@ NAS_PORT = int(os.getenv("NAS_PORT", "445"))
 
 
 class StorageHandler(ABC):
-    def __init__(self, source_id: str, run_id: str, target_path: Optional[str]):
+    def __init__(
+        self,
+        source_id: str,
+        source_name: str,
+        run_id: str,
+        target_path: Optional[str],
+    ):
         self.source_id = source_id
+        self.source_name = sanitize_name(source_name)
         self.run_id = run_id
         self.target_path = target_path
 
@@ -40,14 +72,23 @@ class StorageHandler(ABC):
 
 
 class LocalStorageHandler(StorageHandler):
-    def __init__(self, source_id: str, run_id: str, target_path: Optional[str]):
-        super().__init__(source_id, run_id, target_path)
-        base_path = target_path or f"/app/data/source-{source_id}"
-        self.base_path = Path(base_path) / f"run-{run_id}"
+    def __init__(
+        self,
+        source_id: str,
+        source_name: str,
+        run_id: str,
+        target_path: Optional[str],
+    ):
+        super().__init__(source_id, source_name, run_id, target_path)
+        # Use the sanitized name from parent class
+        base_path = target_path or f"/app/data/source_{self.source_name}"
+        self.base_path = Path(base_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def store_file(self, local_path: str, relative_name: str) -> str:
-        destination = self.base_path / relative_name
+        # Sanitize the filename to ensure filesystem compatibility
+        safe_name = sanitize_name(relative_name)
+        destination = self.base_path / safe_name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local_path, destination)
         return str(destination)
@@ -56,13 +97,19 @@ class LocalStorageHandler(StorageHandler):
 class NASStorageHandler(StorageHandler):
     """Storage handler that uploads files to a NAS share via SMB protocol."""
 
-    def __init__(self, source_id: str, run_id: str, target_path: Optional[str]):
+    def __init__(
+        self,
+        source_id: str,
+        source_name: str,
+        run_id: str,
+        target_path: Optional[str],
+    ):
         if Connection is None:
             raise RuntimeError(
                 "smbprotocol is required for NAS storage but is not installed"
             )
 
-        super().__init__(source_id, run_id, target_path)
+        super().__init__(source_id, source_name, run_id, target_path)
 
         self.server = NAS_SERVER
         self.share = NAS_SHARE
@@ -71,28 +118,41 @@ class NASStorageHandler(StorageHandler):
         self.port = NAS_PORT
 
         # Construct remote base path - all files for a source go in one directory
+        # Use the sanitized name from parent class
         if target_path:
-            self.remote_base = f"{target_path}/source-{source_id}"
+            self.remote_base = f"{target_path}/source_{self.source_name}"
         else:
-            self.remote_base = f"source-{source_id}"
+            self.remote_base = f"source_{self.source_name}"
 
     def store_file(self, local_path: str, relative_name: str) -> str:
         """Upload a file to the NAS share via SMB."""
+        # Sanitize the filename to ensure SMB/Windows compatibility
+        safe_name = sanitize_name(relative_name)
+
+        # Debug logging
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.info(f"NAS upload - Original name: {relative_name}")
+        logger.info(f"NAS upload - Sanitized name: {safe_name}")
+        logger.info(f"NAS upload - Remote base: {self.remote_base}")
+
         connection = Connection(uuid.uuid4(), self.server, self.port)
 
         try:
             connection.connect()
-            
+
             # Create and register session properly
             session = Session(connection, self.username, self.password)
             session.connect()
-            
+
             # Connect to the share
             tree = TreeConnect(session, f"\\\\{self.server}\\{self.share}")
             tree.connect()
 
-            # Build remote path
-            remote_path = f"{self.remote_base}/{relative_name}".replace("\\", "/")
+            # Build remote path with sanitized name
+            remote_path = f"{self.remote_base}/{safe_name}".replace("\\", "/")
+            logger.info(f"NAS upload - Full remote path: {remote_path}")
             remote_parts = remote_path.split("/")
 
             # Create directories if needed
@@ -107,7 +167,8 @@ class NASStorageHandler(StorageHandler):
                     dir_open.create(
                         desired_access=FilePipePrinterAccessMask.GENERIC_READ,
                         file_attributes=FileAttributes.FILE_ATTRIBUTE_DIRECTORY,
-                        share_access=ShareAccess.FILE_SHARE_READ | ShareAccess.FILE_SHARE_WRITE,
+                        share_access=ShareAccess.FILE_SHARE_READ
+                        | ShareAccess.FILE_SHARE_WRITE,
                         create_disposition=CreateDisposition.FILE_OPEN_IF,
                         create_options=CreateOptions.FILE_DIRECTORY_FILE,
                         impersonation_level=ImpersonationLevel.Impersonation,
@@ -127,7 +188,6 @@ class NASStorageHandler(StorageHandler):
                 create_options=0,
                 impersonation_level=ImpersonationLevel.Impersonation,
             )
-
 
             with open(local_path, "rb") as local_file:
                 offset = 0
@@ -152,11 +212,17 @@ class NASStorageHandler(StorageHandler):
 
 
 class S3StorageHandler(StorageHandler):
-    def __init__(self, source_id: str, run_id: str, target_path: Optional[str]):
+    def __init__(
+        self,
+        source_id: str,
+        source_name: str,
+        run_id: str,
+        target_path: Optional[str],
+    ):
         if boto3 is None:
             raise RuntimeError("boto3 is required for S3 storage but is not installed")
 
-        super().__init__(source_id, run_id, target_path)
+        super().__init__(source_id, source_name, run_id, target_path)
 
         bucket = os.getenv("S3_BUCKET")
         prefix = ""
@@ -180,13 +246,14 @@ class S3StorageHandler(StorageHandler):
         self.s3 = boto3.client("s3")
 
     def store_file(self, local_path: str, relative_name: str) -> str:
+        # Sanitize the filename to ensure S3 key compatibility
+        safe_name = sanitize_name(relative_name)
         key_parts = [
             part
             for part in [
                 self.prefix,
-                f"source-{self.source_id}",
-                f"run-{self.run_id}",
-                relative_name,
+                f"source_{self.source_name}",
+                safe_name,
             ]
             if part
         ]
@@ -196,13 +263,17 @@ class S3StorageHandler(StorageHandler):
 
 
 def get_storage_handler(
-    target: TargetEnum, source_id: str, run_id: str, target_path: Optional[str]
+    target: TargetEnum,
+    source_id: str,
+    source_name: str,
+    run_id: str,
+    target_path: Optional[str],
 ) -> StorageHandler:
     if target == TargetEnum.LOCAL:
-        return LocalStorageHandler(source_id, run_id, target_path)
+        return LocalStorageHandler(source_id, source_name, run_id, target_path)
     if target == TargetEnum.NAS:
-        return NASStorageHandler(source_id, run_id, target_path)
+        return NASStorageHandler(source_id, source_name, run_id, target_path)
     if target == TargetEnum.S3:
-        return S3StorageHandler(source_id, run_id, target_path)
+        return S3StorageHandler(source_id, source_name, run_id, target_path)
 
     raise ValueError(f"Unsupported storage target: {target}")
