@@ -124,6 +124,7 @@ def record_scraped_file(
     checksum: Optional[str] = None,
     extracted_from: Optional[str] = None,
     extra_metadata: Optional[Dict] = None,
+    archive_checksum: Optional[str] = None,
 ) -> Optional[ScrapedFile]:
     with get_db_session() as db:
         file_entry = ScrapedFile(
@@ -136,6 +137,7 @@ def record_scraped_file(
             storage_path=storage_path,
             size_bytes=size_bytes,
             checksum=checksum,
+            archive_checksum=archive_checksum,
             extracted_from=extracted_from,
             extra_metadata=extra_metadata or {},
         )
@@ -166,3 +168,25 @@ def get_processed_file_keys(source_id: str) -> Set[Tuple[int, str]]:
             .all()
         )
         return {(message_id, file_id) for message_id, file_id in rows}
+
+
+def get_processed_archive_checksums(source_id: str) -> Set[str]:
+    """
+    Get all archive checksums that have been processed for this source.
+
+    Returns:
+        Set of archive checksums (SHA256 hashes) that were previously processed.
+        This prevents re-downloading the same archive if re-uploaded with different message ID.
+    """
+    with get_db_session() as db:
+        source_uuid = _to_uuid(source_id)
+        rows = (
+            db.query(ScrapedFile.archive_checksum)
+            .filter(
+                ScrapedFile.source_id == source_uuid,
+                ScrapedFile.archive_checksum.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        return {checksum for (checksum,) in rows if checksum}

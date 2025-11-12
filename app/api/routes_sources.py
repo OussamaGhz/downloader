@@ -56,7 +56,7 @@ def create_private_source(source: SourceCreatePrivate, db: Session = Depends(get
         access_level=AccessLevelEnum.PRIVATE,
         identifier=str(source.channel_id),
         channel_title=source.channel_title,
-        session_ref=source.session_id, 
+        session_ref=source.session_id,
         file_types=source.file_types,
         target=source.target,
         target_path=source.target_path,
@@ -69,15 +69,36 @@ def create_private_source(source: SourceCreatePrivate, db: Session = Depends(get
     db.refresh(new_source)
 
     # Create Prefect deployment
-   
     try:
         prefect_client.create_deployment(
             source_id=str(new_source.id),
             source_name=new_source.name,
             cron_schedule=new_source.schedule,
         )
+        print(f"✓ Created Prefect deployment for source {new_source.id}")
     except Exception as e:
-        print(f"Warning: Failed to create Prefect deployment: {e}")
+        print(f"✗ Warning: Failed to create Prefect deployment: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+    # Create concurrency limit for this source (prevents overlapping runs)
+    try:
+        print(f"Creating concurrency limit for source {new_source.id}...")
+        result = prefect_client.create_concurrency_limit(
+            source_id=str(new_source.id),
+            
+            limit=1,  # Only 1 run per source at a time
+        )
+        if result:
+            print(f"✓ Concurrency limit created successfully")
+        else:
+            print(f"⚠️ Concurrency limit creation returned empty result")
+    except Exception as e:
+        print(f"✗ Warning: Failed to create concurrency limit: {e}")
+        import traceback
+
+        traceback.print_exc()
 
     return new_source
 
@@ -109,15 +130,36 @@ def create_public_source(source: SourceCreatePublic, db: Session = Depends(get_d
     db.commit()
     db.refresh(new_source)
 
-    
+    # Create Prefect deployment
     try:
         prefect_client.create_deployment(
             source_id=str(new_source.id),
             source_name=new_source.name,
             cron_schedule=new_source.schedule,
         )
+        print(f"✓ Created Prefect deployment for source {new_source.id}")
     except Exception as e:
-        print(f"Warning: Failed to create Prefect deployment: {e}")
+        print(f"✗ Warning: Failed to create Prefect deployment: {e}")
+        import traceback
+
+        traceback.print_exc()
+
+    # Create concurrency limit for this source (prevents overlapping runs)
+    try:
+        print(f"Creating concurrency limit for source {new_source.id}...")
+        result = prefect_client.create_concurrency_limit(
+            source_id=str(new_source.id),
+            limit=1,  # Only 1 run per source at a time
+        )
+        if result:
+            print(f"✓ Concurrency limit created successfully")
+        else:
+            print(f"⚠️ Concurrency limit creation returned empty result")
+    except Exception as e:
+        print(f"✗ Warning: Failed to create concurrency limit: {e}")
+        import traceback
+
+        traceback.print_exc()
 
     return new_source
 
@@ -181,11 +223,17 @@ def delete_source(source_id: UUID, db: Session = Depends(get_db)):
     if db_source is None:
         raise HTTPException(status_code=404, detail="Source not found")
 
-    # Delete Prefect deployment first
+    # Delete Prefect deployment
     try:
         prefect_client.delete_deployment(str(source_id))
     except Exception as e:
         print(f"Warning: Failed to delete Prefect deployment: {e}")
+
+    # Delete concurrency limit
+    try:
+        prefect_client.delete_concurrency_limit(str(source_id))
+    except Exception as e:
+        print(f"Warning: Failed to delete concurrency limit: {e}")
 
     # Delete source from database
     db.delete(db_source)

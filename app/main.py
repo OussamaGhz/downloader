@@ -13,6 +13,7 @@ from .models.temp_session import TempSession
 from .models.source import Source
 from .models.scrape import ScrapeRun, ScrapedFile, ScrapeLog
 from .services.cleanup import cleanup_expired_temp_sessions
+from .services.prefect_client import prefect_client
 
 
 @asynccontextmanager
@@ -23,6 +24,14 @@ async def lifespan(app: FastAPI):
     """
     # Startup: Create database tables
     Base.metadata.create_all(bind=engine)
+
+    # Activate all concurrency limits on startup
+    # This ensures any limits that were manually deactivated are re-enabled
+    try:
+        print("Activating concurrency limits...")
+        prefect_client.activate_all_concurrency_limits()
+    except Exception as e:
+        print(f"Warning: Failed to activate concurrency limits on startup: {e}")
 
     # Start background cleanup task for expired temporary sessions
     cleanup_task = asyncio.create_task(cleanup_expired_temp_sessions())

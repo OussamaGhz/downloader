@@ -32,6 +32,33 @@ def sanitize_name(name: str) -> str:
     return name or "unnamed"
 
 
+def sanitize_path(path: str) -> str:
+    """Sanitize a full path while preserving directory structure.
+
+    Splits the path into components, sanitizes each separately,
+    and rebuilds the path with forward slashes.
+
+    Args:
+        path: Path string (e.g., "folder/subfolder/file.txt")
+
+    Returns:
+        Sanitized path with directory structure preserved
+        (e.g., "folder/subfolder/file.txt")
+    """
+    # Handle both forward and backslash separators
+    # Normalize to forward slashes first
+    normalized = path.replace("\\", "/")
+
+    # Split into components
+    parts = normalized.split("/")
+
+    # Sanitize each component individually
+    sanitized_parts = [sanitize_name(part) for part in parts if part]
+
+    # Rebuild path with forward slashes
+    return "/".join(sanitized_parts)
+
+
 try:
     import boto3  # type: ignore
 except ImportError:  # pragma: no cover
@@ -47,10 +74,10 @@ except ImportError:  # pragma: no cover
     Connection = Session = TreeConnect = Open = None
 
 # NAS/SMB Configuration Constants
-NAS_SERVER = os.getenv("NAS_SERVER", "172.16.11.226")
-NAS_SHARE = os.getenv("NAS_SHARE", "downloader")
-NAS_USERNAME = os.getenv("NAS_USERNAME", "keystone")
-NAS_PASSWORD = os.getenv("NAS_PASSWORD", "Pass1234")
+NAS_SERVER = os.getenv("NAS_SERVER", "10.200.0.200")
+NAS_SHARE = os.getenv("NAS_SHARE", "LEAKPARK")
+NAS_USERNAME = os.getenv("NAS_USERNAME", "admin")
+NAS_PASSWORD = os.getenv("NAS_PASSWORD", "14Flongar@")
 NAS_PORT = int(os.getenv("NAS_PORT", "445"))
 
 
@@ -86,8 +113,8 @@ class LocalStorageHandler(StorageHandler):
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def store_file(self, local_path: str, relative_name: str) -> str:
-        # Sanitize the filename to ensure filesystem compatibility
-        safe_name = sanitize_name(relative_name)
+        # Sanitize the path while preserving directory structure
+        safe_name = sanitize_path(relative_name)
         destination = self.base_path / safe_name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(local_path, destination)
@@ -119,15 +146,16 @@ class NASStorageHandler(StorageHandler):
 
         # Construct remote base path - all files for a source go in one directory
         # Use the sanitized name from parent class
+        # Add "Downloader" as base directory for organization
         if target_path:
-            self.remote_base = f"{target_path}/source_{self.source_name}"
+            self.remote_base = f"Downloader/{target_path}/source_{self.source_name}"
         else:
-            self.remote_base = f"source_{self.source_name}"
+            self.remote_base = f"Downloader/source_{self.source_name}"
 
     def store_file(self, local_path: str, relative_name: str) -> str:
         """Upload a file to the NAS share via SMB."""
-        # Sanitize the filename to ensure SMB/Windows compatibility
-        safe_name = sanitize_name(relative_name)
+        # Sanitize the path while preserving directory structure
+        safe_name = sanitize_path(relative_name)
 
         # Debug logging
         import logging
@@ -246,8 +274,8 @@ class S3StorageHandler(StorageHandler):
         self.s3 = boto3.client("s3")
 
     def store_file(self, local_path: str, relative_name: str) -> str:
-        # Sanitize the filename to ensure S3 key compatibility
-        safe_name = sanitize_name(relative_name)
+        # Sanitize the path while preserving directory structure
+        safe_name = sanitize_path(relative_name)
         key_parts = [
             part
             for part in [

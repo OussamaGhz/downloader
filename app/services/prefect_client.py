@@ -52,6 +52,9 @@ class PrefectClient:
             "entrypoint": "app/prefect_flows/telegram_flow.py:telegram_scraper_flow",
             "path": "/app",  # Working directory in Docker container
             "storage_document_id": None,  # Use local filesystem
+            # Note: Concurrency is managed via work pool or global concurrency limits
+            # Per-deployment concurrency can be set via work pool concurrency or
+            # by using deployment-level concurrency tags in the flow itself
         }
 
         # Add schedule if provided
@@ -195,6 +198,279 @@ class PrefectClient:
                 f"Could not create flow '{flow_name}' in Prefect. "
                 f"Make sure Prefect Orion is running and accessible at {self.api_url}"
             )
+
+    def create_concurrency_limit(
+        self,
+        source_id: str,
+        limit: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Create a concurrency limit for a source to prevent overlapping runs.
+
+        Uses Prefect's concurrency limits with a per-source tag to ensure that
+        each source can have maximum 1 concurrent run, while different sources
+        can run in parallel.
+
+        Args:
+            source_id: UUID of the source
+            limit: Maximum concurrent runs (default: 1)
+
+        Returns:
+            Created concurrency limit details
+        """
+        tag = f"telegram-scraper-source-{source_id}"
+
+        try:
+            # Check if limit already exists
+            response = requests.post(
+                f"{self.api_url}/concurrency_limits/filter",
+                json={"concurrency_limits": {"tag": {"any_": [tag]}}},
+            )
+
+            if response.status_code == 200:
+                limits = response.json()
+                if limits:
+                    existing_limit = limits[0]
+                    limit_id = existing_limit.get("id")
+
+                    # Check if the existing limit is inactive
+                    if not existing_limit.get("active", False):
+                        print(
+                            f"Concurrency limit exists but is inactive, activating it..."
+                        )
+                        print(f"Existing limit: {existing_limit}")
+
+                        # Update the existing limit to activate it
+                        try:
+                            update_data = {
+                                "tag": tag,
+                                "concurrency_limit": limit,
+                                "active": True,
+                                "active_slots": [],
+                            }
+
+                            print(f"Updating with data: {update_data}")
+
+                            update_response = requests.patch(
+                                f"{self.api_url}/concurrency_limits/{limit_id}",
+                                json=update_data,
+                            )
+
+                            print(
+                                f"Update response status: {update_response.status_code}"
+                            )
+                            print(f"Update response body: {update_response.text}")
+
+                            update_response.raise_for_status()
+                            updated_limit = update_response.json()
+
+                            print(
+                                f"✓ Activated concurrency limit for source {source_id} (tag: {tag}, limit: {limit}, active: {updated_limit.get('active')})"
+                            )
+                            return updated_limit
+                        except Exception as update_error:
+                            print(
+                                f"✗ Failed to activate concurrency limit: {update_error}"
+                            )
+                            import traceback
+
+                            print(f"Traceback: {traceback.format_exc()}")
+                            # Fall through to return existing limit
+
+                    print(
+                        f"Concurrency limit already exists and is active for source {source_id}"
+                    )
+                    return existing_limit
+
+        except Exception as e:
+            print(f"Error checking existing concurrency limit: {e}")
+
+        # Create new concurrency limit
+        try:
+            # Step 1: Create the limit (might be inactive by default)
+            limit_data = {
+                "tag": tag,
+                "concurrency_limit": limit,
+            }
+
+            print(f"Creating concurrency limit with data: {limit_data}")
+
+            response = requests.post(
+                f"{self.api_url}/concurrency_limits/",
+                json=limit_data,
+            )
+
+            print(f"Create response status: {response.status_code}")
+            print(f"Create response body: {response.text}")
+
+            response.raise_for_status()
+            result = response.json()
+            limit_id = result.get("id")
+
+            # Step 2: Explicitly activate the limit
+            if limit_id:
+                print(f"Activating concurrency limit {limit_id}...")
+
+                activate_response = requests.patch(
+                    f"{self.api_url}/concurrency_limits/{limit_id}",
+                    json={"active": True},
+                )
+
+                print(f"Activate response status: {activate_response.status_code}")
+                print(f"Activate response body: {activate_response.text}")
+
+                if activate_response.status_code in [200, 204]:
+                    # Fetch the updated limit to confirm
+                    get_response = requests.get(
+                        f"{self.api_url}/concurrency_limits/{limit_id}"
+                    )
+                    if get_response.status_code == 200:
+                        result = get_response.json()
+                        is_active = result.get("active", False)
+
+                        if is_active:
+                            print(
+                                f"✓ Created and activated concurrency limit for source {source_id} (tag: {tag}, limit: {limit})"
+                            )
+                        else:
+                            print(
+                                f"⚠️ Warning: Limit created but activation failed. Active: {is_active}"
+                            )
+                            print(f"   Full response: {result}")
+                    else:
+                        print(
+                            f"⚠️ Could not verify limit status (GET failed with {get_response.status_code})"
+                        )
+                else:
+                    print(
+                        f"⚠️ Warning: Failed to activate limit (PATCH returned {activate_response.status_code})"
+                    )
+            else:
+                print(f"⚠️ Warning: No limit ID returned from creation")
+
+            return result
+
+        except Exception as e:
+            print(f"✗ Failed to create concurrency limit: {e}")
+            import traceback
+
+            print(f"Traceback: {traceback.format_exc()}")
+            # Don't raise - concurrency limit is nice-to-have, not critical
+            return {}
+
+    def delete_concurrency_limit(self, source_id: str) -> bool:
+        """
+        Delete the concurrency limit for a source.
+
+        Removes the per-source concurrency limit tag from Prefect.
+
+        Args:
+            source_id: UUID of the source
+
+        Returns:
+            True if deleted or doesn't exist
+        """
+        tag = f"telegram-scraper-source-{source_id}"
+
+        try:
+            # Find the limit by tag
+            response = requests.post(
+                f"{self.api_url}/concurrency_limits/filter",
+                json={"concurrency_limits": {"tag": {"any_": [tag]}}},
+            )
+
+            if response.status_code == 200:
+                limits = response.json()
+                if limits:
+                    limit_id = limits[0]["id"]
+
+                    # Delete the limit
+                    delete_response = requests.delete(
+                        f"{self.api_url}/concurrency_limits/{limit_id}",
+                    )
+                    delete_response.raise_for_status()
+                    print(f"✓ Deleted concurrency limit for source {source_id}")
+                    return True
+
+            # Limit doesn't exist, that's fine
+            return True
+
+        except Exception as e:
+            print(f"Warning: Failed to delete concurrency limit: {e}")
+            return True
+
+    def activate_all_concurrency_limits(self) -> int:
+        """
+        Activate all inactive concurrency limits.
+
+        This is useful on startup to ensure all limits are active,
+        especially after a system restart where limits might have been
+        deactivated manually or by some other process.
+
+        Returns:
+            Number of limits activated
+        """
+        activated_count = 0
+
+        try:
+            # Get all concurrency limits with our tag pattern
+            response = requests.post(
+                f"{self.api_url}/concurrency_limits/filter",
+                json={},  # Get all limits
+            )
+
+            if response.status_code != 200:
+                print(
+                    f"Warning: Failed to fetch concurrency limits: {response.status_code}"
+                )
+                return 0
+
+            all_limits = response.json()
+
+            # Filter for our telegram-scraper limits
+            scraper_limits = [
+                limit
+                for limit in all_limits
+                if limit.get("tag", "").startswith("telegram-scraper-source-")
+            ]
+
+            print(f"Found {len(scraper_limits)} telegram scraper concurrency limits")
+
+            # Activate any that are inactive
+            for limit in scraper_limits:
+                if not limit.get("active", False):
+                    limit_id = limit.get("id")
+                    tag = limit.get("tag")
+
+                    try:
+                        update_data = {
+                            "tag": tag,
+                            "concurrency_limit": limit.get("concurrency_limit", 1),
+                            "active": True,
+                        }
+
+                        update_response = requests.patch(
+                            f"{self.api_url}/concurrency_limits/{limit_id}",
+                            json=update_data,
+                        )
+                        update_response.raise_for_status()
+
+                        print(f"✓ Activated concurrency limit: {tag}")
+                        activated_count += 1
+
+                    except Exception as update_error:
+                        print(f"✗ Failed to activate limit {tag}: {update_error}")
+
+            if activated_count > 0:
+                print(f"✓ Activated {activated_count} concurrency limit(s)")
+            else:
+                print("✓ All concurrency limits are already active")
+
+            return activated_count
+
+        except Exception as e:
+            print(f"Warning: Error activating concurrency limits: {e}")
+            return 0
 
 
 prefect_client = PrefectClient(api_url=PREFECT_API_URL)

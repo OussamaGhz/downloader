@@ -23,6 +23,7 @@ class ScrapeStatus(str, enum.Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class LogLevel(str, enum.Enum):
@@ -66,6 +67,9 @@ class ScrapedFile(Base):
     file_extension = Column(String, nullable=True)
     storage_path = Column(String, nullable=False)
     checksum = Column(String, nullable=True)
+    archive_checksum = Column(
+        String(64), nullable=True, index=True
+    )  # SHA256 of archive file
     size_bytes = Column(Integer, nullable=True)
     extracted_from = Column(String, nullable=True)
     extra_metadata = Column(JSON, default=dict)

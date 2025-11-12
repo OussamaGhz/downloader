@@ -1,0 +1,7 @@
+CHECKPOINTS:
+
+ensure file collection ...done
+ensure file download ...done
+ensure file upload  ...done
+
+add concurrency to 1 per deployment
