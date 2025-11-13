@@ -1,0 +1,262 @@
+# =============================================================================
+# K3s Deployment Configuration for Telegram Scraper
+# =============================================================================
+# This file shows how to configure environment variables in K3s/Kubernetes.
+# Use ConfigMaps for non-sensitive data and Secrets for passwords/keys.
+
+---
+# =============================================================================
+# Secret for Sensitive Data (passwords, keys)
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: telegram-scraper-secrets
+  namespace: default
+type: Opaque
+stringData:
+  database-url: "postgresql://user:password@postgres-service:5432/telegram_scraper"
+  encryption-key: "your-encryption-key-here-base64-encoded"
+  nas-password: "your-nas-password-here"
+  nas-username: "admin"
+
+---
+# =============================================================================
+# ConfigMap for Non-Sensitive Configuration
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telegram-scraper-config
+  namespace: default
+data:
+  # Prefect Configuration
+  PREFECT_API_URL: "http://prefect-server:4200/api"
+  
+  # NAS Configuration
+  NAS_SERVER: "10.200.0.200"
+  NAS_SHARE: "LEAKSPARK"
+  NAS_PORT: "445"
+  
+  # Batch and Concurrency Settings
+  MAX_FILES_PER_RUN: "10"
+  DOWNLOAD_CONCURRENCY: "3"
+  
+  # Retry Settings
+  DOWNLOAD_RETRY_ATTEMPTS: "3"
+  DOWNLOAD_RETRY_BASE_DELAY: "2"
+  
+  # Timeout Configurations (seconds)
+  DOWNLOAD_TIMEOUT_PER_FILE: "1800"      # 30 minutes
+  DOWNLOAD_TASK_BASE_TIMEOUT: "14400"    # 4 hours
+  PROCESS_FILE_TIMEOUT: "3600"           # 1 hour
+
+---
+# =============================================================================
+# Deployment - Backend Service
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-scraper-backend
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: telegram-scraper-backend
+  template:
+    metadata:
+      labels:
+        app: telegram-scraper-backend
+    spec:
+      containers:
+      - name: backend
+        image: your-registry/telegram-scraper-backend:latest
+        ports:
+        - containerPort: 8000
+        
+        # Environment variables from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: telegram-scraper-config
+        
+        # Environment variables from Secret
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: telegram-scraper-secrets
+              key: database-url
+        
+        - name: ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: telegram-scraper-secrets
+              key: encryption-key
+        
+        - name: NAS_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: telegram-scraper-secrets
+              key: nas-username
+        
+        - name: NAS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: telegram-scraper-secrets
+              key: nas-password
+        
+        # Resource limits (adjust based on your needs)
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        
+        # Liveness and readiness probes
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        
+        # Volume mounts (if needed for sessions or temp files)
+        volumeMounts:
+        - name: sessions-storage
+          mountPath: /app/sessions
+      
+      volumes:
+      - name: sessions-storage
+        persistentVolumeClaim:
+          claimName: telegram-scraper-sessions-pvc
+
+---
+# =============================================================================
+# Service - Backend
+# =============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-scraper-backend
+  namespace: default
+spec:
+  selector:
+    app: telegram-scraper-backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP
+
+---
+# =============================================================================
+# PersistentVolumeClaim for Sessions Storage
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telegram-scraper-sessions-pvc
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: local-path  # Adjust based on your K3s storage class
+
+---
+# =============================================================================
+# Quick Deploy Commands
+# =============================================================================
+# 1. Create namespace (optional):
+#    kubectl create namespace telegram-scraper
+#
+# 2. Create secrets (update with your actual values):
+#    kubectl create secret generic telegram-scraper-secrets \
+#      --from-literal=database-url='postgresql://user:pass@host:5432/db' \
+#      --from-literal=encryption-key='your-key' \
+#      --from-literal=nas-username='admin' \
+#      --from-literal=nas-password='your-password' \
+#      -n default
+#
+# 3. Apply this configuration:
+#    kubectl apply -f k3s-deployment.yaml
+#
+# 4. Check deployment status:
+#    kubectl get pods -n default
+#    kubectl logs -f deployment/telegram-scraper-backend -n default
+#
+# 5. Update environment variables:
+#    kubectl edit configmap telegram-scraper-config -n default
+#    kubectl rollout restart deployment/telegram-scraper-backend -n default
+#
+# 6. Scale replicas (if needed):
+#    kubectl scale deployment telegram-scraper-backend --replicas=2 -n default
+
+---
+# =============================================================================
+# Alternative: Direct Environment Variable Injection
+# =============================================================================
+# If you prefer not to use ConfigMaps/Secrets, you can directly set env vars:
+#
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: telegram-scraper-backend
+# spec:
+#   template:
+#     spec:
+#       containers:
+#       - name: backend
+#         env:
+#         - name: NAS_SERVER
+#           value: "10.200.0.200"
+#         - name: NAS_SHARE
+#           value: "LEAKSPARK"
+#         - name: NAS_USERNAME
+#           value: "admin"
+#         - name: NAS_PASSWORD
+#           value: "your-password"  # NOT RECOMMENDED for production
+#         - name: MAX_FILES_PER_RUN
+#           value: "10"
+#         - name: DOWNLOAD_CONCURRENCY
+#           value: "3"
+#         # ... etc
+
+---
+# =============================================================================
+# Deployment Profiles for Different Scenarios
+# =============================================================================
+
+# Profile: Large Files (500MB-2GB each)
+# MAX_FILES_PER_RUN: "10"
+# DOWNLOAD_CONCURRENCY: "3"
+# DOWNLOAD_TIMEOUT_PER_FILE: "1800"
+# DOWNLOAD_TASK_BASE_TIMEOUT: "14400"
+# PROCESS_FILE_TIMEOUT: "3600"
+
+# Profile: Medium Files (10MB-500MB each)
+# MAX_FILES_PER_RUN: "50"
+# DOWNLOAD_CONCURRENCY: "5"
+# DOWNLOAD_TIMEOUT_PER_FILE: "600"
+# DOWNLOAD_TASK_BASE_TIMEOUT: "7200"
+# PROCESS_FILE_TIMEOUT: "1800"
+
+# Profile: Small Files (<10MB each)
+# MAX_FILES_PER_RUN: "100"
+# DOWNLOAD_CONCURRENCY: "10"
+# DOWNLOAD_TIMEOUT_PER_FILE: "300"
+# DOWNLOAD_TASK_BASE_TIMEOUT: "3600"
+# PROCESS_FILE_TIMEOUT: "900"

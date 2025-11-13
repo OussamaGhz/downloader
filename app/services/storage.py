@@ -73,12 +73,14 @@ try:
 except ImportError:  # pragma: no cover
     Connection = Session = TreeConnect = Open = None
 
-# NAS/SMB Configuration Constants
-NAS_SERVER = os.getenv("NAS_SERVER", "10.200.0.200")
-NAS_SHARE = os.getenv("NAS_SHARE", "LEAKPARK")
-NAS_USERNAME = os.getenv("NAS_USERNAME", "admin")
-NAS_PASSWORD = os.getenv("NAS_PASSWORD", "14Flongar@")
-NAS_PORT = int(os.getenv("NAS_PORT", "445"))
+# Import NAS configuration from centralized config
+from app.core.config import (
+    NAS_SERVER,
+    NAS_SHARE,
+    NAS_USERNAME,
+    NAS_PASSWORD,
+    NAS_PORT,
+)
 
 
 class StorageHandler(ABC):

@@ -50,20 +50,15 @@ from app.services.scrape_progress import (
     update_run_counts,
 )
 from app.services.storage import get_storage_handler
-
-
-# Batch and concurrency settings
-MAX_FILES_PER_RUN = 10  # Reduced for large files (500MB-2GB each)
-DOWNLOAD_CONCURRENCY = 3
-
-# Retry settings
-DOWNLOAD_RETRY_ATTEMPTS = 3
-DOWNLOAD_RETRY_BASE_DELAY = 2
-
-# Timeout configurations (adjusted for large files)
-DOWNLOAD_TIMEOUT_PER_FILE = 1800  # 30 min per file (for 2GB files)
-DOWNLOAD_TASK_BASE_TIMEOUT = 14400  # 4 hours for entire download phase
-PROCESS_FILE_TIMEOUT = 3600  # 1 hour per file processing (extract + upload)
+from app.core.config import (
+    MAX_FILES_PER_RUN,
+    DOWNLOAD_CONCURRENCY,
+    DOWNLOAD_RETRY_ATTEMPTS,
+    DOWNLOAD_RETRY_BASE_DELAY,
+    DOWNLOAD_TIMEOUT_PER_FILE,
+    DOWNLOAD_TASK_BASE_TIMEOUT,
+    PROCESS_FILE_TIMEOUT,
+)
 
 
 def _chunked(sequence: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
